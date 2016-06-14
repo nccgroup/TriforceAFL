@@ -198,6 +198,7 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
 #endif /* DEBUG_DISAS */
 
     cpu->can_do_io = 0;
+    target_ulong pc = env->eip;
     next_tb = tcg_qemu_tb_exec(env, tb_ptr);
     cpu->can_do_io = 1;
     trace_exec_tb_exit((void *) (next_tb & ~TB_EXIT_MASK),
@@ -216,13 +217,19 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
             assert(cc->set_pc);
             cc->set_pc(cpu, tb->pc);
         }
+    } else {
+        /* we executed it, trace it */
+        AFL_QEMU_CPU_SNIPPET2(env, pc);
     }
+
     if ((next_tb & TB_EXIT_MASK) == TB_EXIT_REQUESTED) {
         /* We were asked to stop executing TBs (probably a pending
          * interrupt. We've now stopped, so clear the flag.
          */
         cpu->tcg_exit_req = 0;
     }
+    if(afl_wants_cpu_to_stop)
+        cpu->exit_request = 1;
     return next_tb;
 }
 
@@ -498,12 +505,14 @@ int cpu_exec(CPUArchState *env)
                     tcg_ctx.tb_ctx.tb_invalidated_flag = 0;
                 }
 
-                AFL_QEMU_CPU_SNIPPET2;
-
                 if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
                     qemu_log("Trace %p [" TARGET_FMT_lx "] %s\n",
                              tb->tc_ptr, tb->pc, lookup_symbol(tb->pc));
                 }
+/*
+ * chaining complicates AFL's instrumentation so we disable it
+ */
+#ifdef NOPE_NOT_NEVER
                 /* see if we can patch the calling TB. When the TB
                    spans two pages, we cannot safely do a direct
                    jump. */
@@ -511,6 +520,7 @@ int cpu_exec(CPUArchState *env)
                     tb_add_jump((TranslationBlock *)(next_tb & ~TB_EXIT_MASK),
                                 next_tb & TB_EXIT_MASK, tb);
                 }
+#endif
                 have_tb_lock = false;
                 spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
 

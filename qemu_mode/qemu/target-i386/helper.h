@@ -1,3 +1,6 @@
+DEF_HELPER_0(aflInterceptPanic, void)
+DEF_HELPER_1(aflInterceptLog, void, env)
+DEF_HELPER_4(aflCall, tl, env, tl, tl, tl)
 DEF_HELPER_FLAGS_4(cc_compute_all, TCG_CALL_NO_RWG_SE, tl, tl, tl, tl, int)
 DEF_HELPER_FLAGS_4(cc_compute_c, TCG_CALL_NO_RWG_SE, tl, tl, tl, tl, int)
 

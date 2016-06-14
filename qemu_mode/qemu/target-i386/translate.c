@@ -128,6 +128,7 @@ typedef struct DisasContext {
     int cpuid_7_0_ebx_features;
 } DisasContext;
 
+static void gen_aflBBlock(target_ulong pc);
 static void gen_eob(DisasContext *s);
 static void gen_jmp(DisasContext *s, target_ulong eip);
 static void gen_jmp_tb(DisasContext *s, target_ulong eip, int tb_num);
@@ -7113,6 +7114,9 @@ static target_ulong disas_insn(CPUX86State *env, DisasContext *s,
             gen_eob(s);
         }
         break;
+    case 0x124: /* pseudo-instr: 0x0f 0x24 - AFL call */
+        gen_helper_aflCall(cpu_regs[R_EAX], cpu_env, cpu_regs[R_EDI], cpu_regs[R_ESI], cpu_regs[R_EDX]);
+        break;
 #ifdef TARGET_X86_64
     case 0x105: /* syscall */
         /* XXX: is it usable in real mode ? */
@@ -7992,6 +7996,7 @@ static inline void gen_intermediate_code_internal(X86CPU *cpu,
     cpu_cc_srcT = tcg_temp_local_new();
 
     dc->is_jmp = DISAS_NEXT;
+    gen_aflBBlock(pc_start);
     pc_ptr = pc_start;
     lj = -1;
     num_insns = 0;
@@ -8137,3 +8142,155 @@ void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb, int pc_pos)
     if (cc_op != CC_OP_DYNAMIC)
         env->cc_op = cc_op;
 }
+
+#include "afl.h"
+
+static target_ulong startForkserver(CPUArchState *env, target_ulong enableTicks)
+{
+    //printf("pid %d: startForkServer\n", getpid()); fflush(stdout);
+    assert(!afl_fork_child);
+#ifdef CONFIG_USER_ONLY
+    /* we're running in the main thread, get right to it! */
+    afl_setup();
+    afl_forkserver(env);
+#else
+    /*
+     * we're running in a cpu thread. we'll exit the cpu thread
+     * and notify the iothread.  The iothread will run the forkserver
+     * and in the child will restart the cpu thread which will continue
+     * execution.
+     * N.B. We assume a single cpu here!
+     */
+    aflEnableTicks = enableTicks;
+    afl_wants_cpu_to_stop = 1;
+#endif
+    return 0;
+}
+
+/* copy work into ptr[0..sz].  Assumes memory range is locked. */
+static target_ulong getWork(CPUArchState *env, target_ulong ptr, target_ulong sz)
+{
+    target_ulong retsz;
+    FILE *fp;
+    unsigned char ch;
+
+    //printf("pid %d: getWork %lx %lx\n", getpid(), ptr, sz);fflush(stdout);
+    assert(aflStart == 0);
+    fp = fopen(aflFile, "rb");
+    if(!fp) {
+         perror(aflFile);
+         return -1;
+    }
+    retsz = 0;
+    while(retsz < sz) {
+        if(fread(&ch, 1, 1, fp) == 0)
+            break;
+        cpu_stb_data(env, ptr, ch);
+        retsz ++;
+        ptr ++;
+    }
+    fclose(fp);
+    return retsz;
+}
+
+static target_ulong startWork(CPUArchState *env, target_ulong ptr)
+{
+    target_ulong start, end;
+
+    //printf("pid %d: ptr %lx\n", getpid(), ptr);fflush(stdout);
+    start = cpu_ldq_data(env, ptr);
+    end = cpu_ldq_data(env, ptr + sizeof start);
+    //printf("pid %d: startWork %lx - %lx\n", getpid(), start, end);fflush(stdout);
+
+    afl_start_code = start;
+    afl_end_code   = end;
+    aflGotLog = 0;
+    aflStart = 1;
+    return 0;
+}
+
+static target_ulong doneWork(target_ulong val)
+{
+    //printf("pid %d: doneWork %lx\n", getpid(), val);fflush(stdout);
+    assert(aflStart == 1);
+/* detecting logging as crashes hasnt been helpful and
+   has occasionally been a problem.  We'll leave it to
+   a post-analysis phase to look over dmesg output for
+   our corpus.
+ */
+#ifdef LETSNOT 
+    if(aflGotLog)
+        exit(64 | val);
+#endif
+    exit(val); /* exit forkserver child */
+}
+
+target_ulong helper_aflCall(CPUArchState *env, target_ulong code, target_ulong a0, target_ulong a1) {
+    switch(code) {
+    case 1: return startForkserver(env, a0);
+    case 2: return getWork(env, a0, a1);
+    case 3: return startWork(env, a0);
+    case 4: return doneWork(a0);
+    default: return -1;
+    }
+}
+
+/* return pointer to static buf filled with strz from ptr[0..maxlen] */
+static const char *
+peekStrZ(CPUArchState *env, target_ulong ptr, int maxlen)
+{
+    static char buf[0x1000];
+    int i;
+    if(maxlen > sizeof buf - 1)
+        maxlen = sizeof buf - 1;
+    for(i = 0; i < maxlen; i++) {
+        char ch = cpu_ldub_data(env, ptr + i);
+        if(!ch)
+            break;
+        buf[i] = ch;
+    }
+    buf[i] = 0;
+    return buf;
+}
+
+void helper_aflInterceptLog(CPUArchState *env)
+{
+    if(!aflStart)
+        return;
+    aflGotLog = 1;
+
+    static FILE *fp = NULL;
+    if(fp == NULL) {
+        fp = fopen("logstore.txt", "a");
+        if(fp) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            fprintf(fp, "\n----\npid %d time %ld.%06ld\n", getpid(), (u_long)tv.tv_sec, (u_long)tv.tv_usec);
+        }
+    }
+    if(!fp) 
+        return;
+
+    target_ulong stack = env->regs[R_ESP];
+    //target_ulong level = env->regs[R_ESI]; // arg 2
+    target_ulong ptext = cpu_ldq_data(env, stack + 0x8); // arg7
+    target_ulong len   = cpu_ldq_data(env, stack + 0x10) & 0xffff; // arg8
+    const char *msg = peekStrZ(env, ptext, len);
+    fprintf(fp, "%s\n", msg);
+}
+
+void helper_aflInterceptPanic(void)
+{
+    if(!aflStart)
+        return;
+    exit(32);
+}
+
+static void gen_aflBBlock(target_ulong pc)
+{
+    if(pc == aflPanicAddr)
+        gen_helper_aflInterceptPanic();
+    if(pc == aflDmesgAddr)
+        gen_helper_aflInterceptLog(cpu_env);
+}
+
