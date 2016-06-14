@@ -28,6 +28,8 @@
 #include "exec/memory-internal.h"
 #include "qemu/rcu.h"
 
+#include "afl-qemu-cpu-inl.h"
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -296,7 +298,10 @@ static TranslationBlock *tb_find_slow(CPUArchState *env,
     }
  not_found:
    /* if no translated code available, then translate it now */
+
     tb = tb_gen_code(cpu, pc, cs_base, flags, 0);
+
+    AFL_QEMU_CPU_SNIPPET1;
 
  found:
     /* Move the last found TB to the head of the list */
@@ -492,6 +497,9 @@ int cpu_exec(CPUArchState *env)
                     next_tb = 0;
                     tcg_ctx.tb_ctx.tb_invalidated_flag = 0;
                 }
+
+                AFL_QEMU_CPU_SNIPPET2;
+
                 if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
                     qemu_log("Trace %p [" TARGET_FMT_lx "] %s\n",
                              tb->tc_ptr, tb->pc, lookup_symbol(tb->pc));
