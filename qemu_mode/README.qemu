@@ -1,3 +1,22 @@
+<ProjectTriforce>
+20160613
+
+See below for the normal README information that comes with AFL.
+
+This directory contains a patched version of QEMU.  It now
+supports system-mode QEMU support in AFL.  The original
+user-mode support should still work but has not been heavily
+tested since the changes ProjectTriforce changes have been
+applied.  Only x86_64 is supported, though it should not be
+difficult to support other platforms with similar patches.
+
+The patch files that come with AFL are no longer relevant and have 
+been removed.  The build_qemu_support.sh script has been replaced
+with more relevant commands but without as much fool proof testing.
+</ProjectTriforce>
+
+
+
 =========================================================
 High-performance binary-only instrumentation for afl-fuzz
 =========================================================
