@@ -52,7 +52,7 @@
 
 /* Default memory limit when running in QEMU mode (MB): */
 
-#define MEM_LIMIT_QEMU      200
+#define MEM_LIMIT_QEMU      2048
 
 /* Number of calibration cycles per every new test case (and for test
    cases that show variable behavior): */
@@ -288,7 +288,7 @@
 /* Fork server init timeout multiplier: we'll wait the user-selected
    timeout plus this much for the fork server to spin up. */
 
-#define FORK_WAIT_MULT      10
+#define FORK_WAIT_MULT      100000
 
 /* Calibration timeout adjustments, to be a bit more generous when resuming
    fuzzing sessions or trying to calibrate already-added internal finds.
@@ -307,7 +307,7 @@
    problems with complex programs). You need to recompile the target binary
    after changing this - otherwise, SEGVs may ensue. */
 
-#define MAP_SIZE_POW2       16
+#define MAP_SIZE_POW2       21
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
 
 /* Maximum allocator request size (keep well under INT_MAX): */

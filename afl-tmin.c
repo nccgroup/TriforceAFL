@@ -864,23 +864,30 @@ static void find_binary(u8* fname) {
 
 /* Fix up argv for QEMU. */
 
-static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
+static char** get_qemu_argv(int qemu_mode, u8* own_loc, char** argv, int argc) {
 
   char** new_argv = ck_alloc(sizeof(char*) * (argc + 4));
   u8 *tmp, *cp, *rsl, *own_copy;
 
-  memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
+  if(qemu_mode == 1) {
+    memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
+
+    new_argv[2] = target_path;
+    new_argv[1] = "--";
+  } else {
+    memcpy(new_argv + 1, argv + 1, sizeof(char*) * argc);
+  }
 
   /* Now we need to actually find qemu for argv[0]. */
-
-  new_argv[2] = target_path;
-  new_argv[1] = "--";
-
   tmp = getenv("AFL_PATH");
 
   if (tmp) {
 
-    cp = alloc_printf("%s/afl-qemu-trace", tmp);
+    if(qemu_mode == 1)
+      cp = alloc_printf("%s/afl-qemu-trace", tmp);
+    else
+      cp = alloc_printf("%s/afl-qemu-system-trace", tmp);
+
 
     if (access(cp, X_OK))
       FATAL("Unable to find '%s'", tmp);
@@ -897,7 +904,10 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
     *rsl = 0;
 
-    cp = alloc_printf("%s/afl-qemu-trace", own_copy);
+    if(qemu_mode == 1)
+      cp = alloc_printf("%s/afl-qemu-trace", own_copy);
+    else
+      cp = alloc_printf("%s/afl-qemu-system-trace", own_copy);
     ck_free(own_copy);
 
     if (!access(cp, X_OK)) {
@@ -909,9 +919,15 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
   } else ck_free(own_copy);
 
-  if (!access(BIN_PATH "/afl-qemu-trace", X_OK)) {
+  if (qemu_mode == 1 && !access(BIN_PATH "/afl-qemu-trace", X_OK)) {
 
     target_path = new_argv[0] = BIN_PATH "/afl-qemu-trace";
+    return new_argv;
+
+  }
+  if (qemu_mode > 1 && !access(BIN_PATH "/afl-qemu-system-trace", X_OK)) {
+
+    target_path = new_argv[0] = BIN_PATH "/afl-qemu-system-trace";
     return new_argv;
 
   }
@@ -1019,10 +1035,10 @@ int main(int argc, char** argv) {
 
       case 'Q':
 
-        if (qemu_mode) FATAL("Multiple -Q options not supported");
+        //if (qemu_mode) FATAL("Multiple -Q options not supported");
         if (!mem_limit_given) mem_limit = MEM_LIMIT_QEMU;
 
-        qemu_mode = 1;
+        qemu_mode += 1;
         break;
 
       default:
@@ -1042,7 +1058,7 @@ int main(int argc, char** argv) {
   detect_file_args(argv + optind);
 
   if (qemu_mode)
-    use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
+    use_argv = get_qemu_argv(qemu_mode, argv[0], argv + optind, argc - optind);
   else
     use_argv = argv + optind;
 

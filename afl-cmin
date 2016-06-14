@@ -79,9 +79,7 @@ while getopts "+i:o:f:m:t:eQC" opt; do
          export AFL_CMIN_CRASHES_ONLY=1
          ;;
     "Q")
-         EXTRA_PAR="$EXTRA_PAR -Q"
-         test "$MEM_LIMIT_GIVEN" = "" && MEM_LIMIT=250
-         QEMU_MODE=1
+         QEMU_MODE="${QEMU_MODE}Q"
          ;;
     "?")
          exit 1
@@ -90,6 +88,11 @@ while getopts "+i:o:f:m:t:eQC" opt; do
    esac
 
 done
+
+if [ ! -z $QEMU_MODE ] ; then
+  # XXX set MEM_LIMIT?
+  EXTRA_PAR="$EXTRA_PAR -$QEMU_MODE"
+fi
 
 shift $((OPTIND-1))
 
@@ -151,13 +154,16 @@ fi
 
 TRACE_DIR="$OUT_DIR/.traces"
 
-if [ "$STDIN_FILE" = "" ]; then
+# XXX we're using @@ in the afl-fuzz sense in afl-showmap now.
+# so get rid of this stdin stuff, which we dont support anymore. -TimN
 
-  if echo "$*" | grep -qF '@@'; then
-    STDIN_FILE="$TRACE_DIR/.cur_input"
-  fi
-
-fi
+#if [ "$STDIN_FILE" = "" ]; then
+#
+#  if echo "$*" | grep -qF '@@'; then
+#    STDIN_FILE="$TRACE_DIR/.cur_input"
+#  fi
+#
+#fi
 
 # Check for obvious errors.
 
@@ -256,32 +262,35 @@ fi
 # Make sure that we can actually get anything out of afl-showmap before we
 # waste too much time.
 
-echo "[*] Testing the target binary..."
+# XXX removed this for now -- we cant afford another showmap startup
+# when showmap might take several minutes to launch forkserver -TimN
 
-if [ "$STDIN_FILE" = "" ]; then
-
-  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -- "$@" <"$IN_DIR/$FIRST_FILE"
-
-else
-
-  cp "$IN_DIR/$FIRST_FILE" "$STDIN_FILE"
-  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
-
-fi
-
-FIRST_COUNT=$((`grep -c . "$TRACE_DIR/.run_test"`))
-
-if [ "$FIRST_COUNT" -gt "0" ]; then
-
-  echo "[+] OK, $FIRST_COUNT tuples recorded."
-
-else
-
-  echo "[-] Error: no instrumentation output detected (perhaps crash or timeout)." 1>&2
-  test "$AFL_KEEP_TRACES" = "" && rm -rf "$TRACE_DIR"
-  exit 1
-
-fi
+#echo "[*] Testing the target binary..."
+#
+#if [ "$STDIN_FILE" = "" ]; then
+#
+#  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -- "$@" <"$IN_DIR/$FIRST_FILE"
+#
+#else
+#
+#  cp "$IN_DIR/$FIRST_FILE" "$STDIN_FILE"
+#  AFL_CMIN_ALLOW_ANY=1 "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/.run_test" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
+#
+#fi
+#
+#FIRST_COUNT=$((`grep -c . "$TRACE_DIR/.run_test"`))
+#
+#if [ "$FIRST_COUNT" -gt "0" ]; then
+#
+#  echo "[+] OK, $FIRST_COUNT tuples recorded."
+#
+#else
+#
+#  echo "[-] Error: no instrumentation output detected (perhaps crash or timeout)." 1>&2
+#  test "$AFL_KEEP_TRACES" = "" && rm -rf "$TRACE_DIR"
+#  exit 1
+#
+#fi
 
 # Let's roll!
 
@@ -293,32 +302,15 @@ echo "[*] Obtaining traces for input files in '$IN_DIR'..."
 
 (
 
-  CUR=0
-
   if [ "$STDIN_FILE" = "" ]; then
 
-    while read -r fn; do
-
-      CUR=$((CUR+1))
-      printf "\\r    Processing file $CUR/$IN_COUNT... "
-
-      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -- "$@" <"$IN_DIR/$fn"
-
-    done < <(ls "$IN_DIR")
+    "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR" -Z $EXTRA_PAR "$IN_DIR"/* -- "$@" 
 
   else
 
-    while read -r fn; do
+    cp "$IN_DIR/$fn" "$STDIN_FILE"
 
-      CUR=$((CUR+1))
-      printf "\\r    Processing file $CUR/$IN_COUNT... "
-
-      cp "$IN_DIR/$fn" "$STDIN_FILE"
-
-      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
-
-    done < <(ls "$IN_DIR")
-
+    "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR" -Z $EXTRA_PAR -A "$STDIN_FILE" "$IN_DIR"/* -- "$@" </dev/null
 
   fi
 

@@ -38,6 +38,7 @@
 #include <signal.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <libgen.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -46,7 +47,11 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 
-static s32 child_pid;                 /* PID of the tested program         */
+static s32 forksrv_pid,               /* PID of the fork server           */
+           child_pid;                 /* PID of the tested program         */
+
+static s32 fsrv_ctl_fd,               /* Fork server control pipe (write) */
+           fsrv_st_fd;                /* Fork server status pipe (read)   */
 
 static u8* trace_bits;                /* SHM with instrumentation bitmap   */
 
@@ -201,29 +206,39 @@ static u32 write_results(void) {
 
 static void handle_timeout(int sig) {
 
-  child_timed_out = 1;
-  if (child_pid > 0) kill(child_pid, SIGKILL);
+  if (child_pid > 0) {
+
+    child_timed_out = 1;
+    kill(child_pid, SIGKILL);
+
+  } else if (child_pid == -1 && forksrv_pid > 0) {
+
+    child_timed_out = 1;
+    kill(forksrv_pid, SIGKILL);
+
+  }
 
 }
 
-
-/* Execute target application. */
-
-static void run_target(char** argv) {
-
+/* start the app and it's forkserver */
+static void init_forkserver(char **argv) {
   static struct itimerval it;
+  int st_pipe[2], ctl_pipe[2];
   int status = 0;
+  s32 rlen;
+
+  if (!quiet_mode)
+    SAYF("Spinning up the fork server...\n");
+  if (pipe(st_pipe) || pipe(ctl_pipe)) PFATAL("pipe() failed");
 
   if (!quiet_mode)
     SAYF("-- Program output begins --\n" cRST);
 
-  MEM_BARRIER();
+  forksrv_pid = fork();
 
-  child_pid = fork();
+  if (forksrv_pid < 0) PFATAL("fork() failed");
 
-  if (child_pid < 0) PFATAL("fork() failed");
-
-  if (!child_pid) {
+  if (!forksrv_pid) {
 
     struct rlimit r;
 
@@ -259,12 +274,120 @@ static void run_target(char** argv) {
     r.rlim_max = r.rlim_cur = 0;
     setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
 
+    /* Set up control and status pipes, close the unneeded original fds. */
+
+    if (dup2(ctl_pipe[0], FORKSRV_FD) < 0) PFATAL("dup2() failed");
+    if (dup2(st_pipe[1], FORKSRV_FD + 1) < 0) PFATAL("dup2() failed");
+
+    close(ctl_pipe[0]);
+    close(ctl_pipe[1]);
+    close(st_pipe[0]);
+    close(st_pipe[1]);
+
     execv(target_path, argv);
 
     *(u32*)trace_bits = EXEC_FAIL_SIG;
     exit(0);
 
   }
+
+  /* Close the unneeded endpoints. */
+
+  close(ctl_pipe[0]);
+  close(st_pipe[1]);
+
+  fsrv_ctl_fd = ctl_pipe[1];
+  fsrv_st_fd  = st_pipe[0];
+
+  /* Configure timeout, wait for child, cancel timeout. */
+
+  if (exec_tmout) {
+
+    child_timed_out = 0;
+    it.it_value.tv_sec = (exec_tmout * FORK_WAIT_MULT / 1000);
+    it.it_value.tv_usec = ((exec_tmout * FORK_WAIT_MULT) % 1000) * 1000;
+
+  }
+
+  setitimer(ITIMER_REAL, &it, NULL);
+
+  rlen = read(fsrv_st_fd, &status, 4);
+
+  it.it_value.tv_sec = 0;
+  it.it_value.tv_usec = 0;
+  setitimer(ITIMER_REAL, &it, NULL);
+
+  if(!quiet_mode)
+    SAYF(cRST "-- Program output ends --\n");
+
+  /* If we have a four-byte "hello" message from the server, we're all set.
+     Otherwise, try to figure out what went wrong. */
+
+  if (rlen == 4) {
+    if(!quiet_mode)
+      SAYF("All right - fork server is up.");
+    return;
+  }
+
+  if (waitpid(forksrv_pid, &status, 0) <= 0)
+    PFATAL("waitpid() failed");
+
+  if (WIFSIGNALED(status))
+    child_crashed = 1;
+
+  if (!quiet_mode) {
+
+    if (child_timed_out)
+      SAYF(cLRD "\n+++ Program timed off +++\n" cRST);
+    else if (stop_soon)
+      SAYF(cLRD "\n+++ Program aborted by user +++\n" cRST);
+    else if (child_crashed)
+      SAYF(cLRD "\n+++ Program killed by signal %u +++\n" cRST, WTERMSIG(status));
+
+  }
+
+}
+
+
+/* Execute target application. */
+
+static u8 run_target(char** argv) {
+
+  static struct itimerval it;
+  static u32 prev_timed_out = 0;
+
+  int status = 0;
+
+  if(!quiet_mode)
+    SAYF("-- Program output begins --\n" cRST);
+
+  /* After this memset, trace_bits[] are effectively volatile, so we
+     must prevent any earlier operations from venturing into that
+     territory. */
+
+  memset(trace_bits, 0, MAP_SIZE);
+  MEM_BARRIER();
+
+  s32 res;
+
+  /* we have the fork server up and running, so simply
+     tell it to have at it, and then read back PID. */
+
+  if ((res = write(fsrv_ctl_fd, &prev_timed_out, 4)) != 4) {
+
+    if (stop_soon) return 0;
+    RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+
+  }
+
+  if ((res = read(fsrv_st_fd, &child_pid, 4)) != 4) {
+
+    if (stop_soon) return 0;
+    RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+
+  }
+
+  if (child_pid <= 0) FATAL("Fork server is misbehaving (OOM?)");
 
   /* Configure timeout, wait for child, cancel timeout. */
 
@@ -278,12 +401,20 @@ static void run_target(char** argv) {
 
   setitimer(ITIMER_REAL, &it, NULL);
 
-  if (waitpid(child_pid, &status, 0) <= 0) FATAL("waitpid() failed");
+  if ((res = read(fsrv_st_fd, &status, 4)) != 4) {
+
+    if (stop_soon) return 0;
+    RPFATAL(res, "Unable to communicate with fork server (OOM?)");
+
+  }
 
   child_pid = 0;
   it.it_value.tv_sec = 0;
   it.it_value.tv_usec = 0;
   setitimer(ITIMER_REAL, &it, NULL);
+
+  if(!quiet_mode)
+    SAYF(cRST "-- Program output ends --\n");
 
   MEM_BARRIER();
 
@@ -293,9 +424,7 @@ static void run_target(char** argv) {
     FATAL("Unable to execute '%s'", argv[0]);
 
   classify_counts(trace_bits);
-
-  if (!quiet_mode)
-    SAYF(cRST "-- Program output ends --\n");
+  prev_timed_out = child_timed_out;
 
   if (!child_timed_out && !stop_soon && WIFSIGNALED(status))
     child_crashed = 1;
@@ -311,7 +440,7 @@ static void run_target(char** argv) {
 
   }
 
-
+  return 0;
 }
 
 
@@ -371,6 +500,8 @@ static void setup_signal_handlers(void) {
   sa.sa_handler = handle_timeout;
   sigaction(SIGALRM, &sa, NULL);
 
+  /* ignore */
+  sigaction(SIGPIPE, &sa, NULL);
 }
 
 
@@ -432,11 +563,12 @@ static void usage(u8* argv0) {
 
   show_banner();
 
-  SAYF("\n%s [ options ] -- /path/to/target_app [ ... ]\n\n"
+  SAYF("\n%s [ options ] -- /path/to/target_app [ ... ]\n"
+       "%s [ options ] files.. -- /path/to/target_app [ ... ]\n\n"
 
        "Required parameters:\n\n"
 
-       "  -o file       - file to write the trace data to\n\n"
+       "  -o file       - file (or dir) to write the trace data to\n\n"
 
        "Execution control settings:\n\n"
 
@@ -452,7 +584,7 @@ static void usage(u8* argv0) {
        "This tool displays raw tuple data captured by AFL instrumentation.\n"
        "For additional help, consult %s/README.\n\n" cRST,
 
-       argv0, MEM_LIMIT, doc_path);
+       argv0, argv0, MEM_LIMIT, doc_path);
 
   exit(1);
 
@@ -514,15 +646,19 @@ static void find_binary(u8* fname) {
 
 /* Fix up argv for QEMU. */
 
-static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
+static char** get_qemu_argv(int qemu_mode, u8* own_loc, char** argv, int argc) {
 
   char** new_argv = ck_alloc(sizeof(char*) * (argc + 4));
   u8 *tmp, *cp, *rsl, *own_copy;
 
-  memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
+  if(qemu_mode == 1) {
+    memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
 
-  new_argv[2] = target_path;
-  new_argv[1] = "--";
+    new_argv[2] = target_path;
+    new_argv[1] = "--";
+  } else {
+    memcpy(new_argv + 1, argv + 1, sizeof(char*) * argc);
+  } 
 
   /* Now we need to actually find qemu for argv[0]. */
 
@@ -530,7 +666,10 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
   if (tmp) {
 
-    cp = alloc_printf("%s/afl-qemu-trace", tmp);
+    if(qemu_mode == 1)
+      cp = alloc_printf("%s/afl-qemu-trace", tmp);
+    else
+      cp = alloc_printf("%s/afl-qemu-system-trace", tmp);
 
     if (access(cp, X_OK))
       FATAL("Unable to find '%s'", tmp);
@@ -547,7 +686,10 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
     *rsl = 0;
 
-    cp = alloc_printf("%s/afl-qemu-trace", own_copy);
+    if(qemu_mode == 1)
+      cp = alloc_printf("%s/afl-qemu-trace", own_copy);
+    else
+      cp = alloc_printf("%s/afl-qemu-system-trace", own_copy);
     ck_free(own_copy);
 
     if (!access(cp, X_OK)) {
@@ -559,9 +701,15 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
   } else ck_free(own_copy);
 
-  if (!access(BIN_PATH "/afl-qemu-trace", X_OK)) {
+  if (qemu_mode == 1 && !access(BIN_PATH "/afl-qemu-trace", X_OK)) {
 
     target_path = new_argv[0] = BIN_PATH "/afl-qemu-trace";
+    return new_argv;
+
+  }
+  if (qemu_mode > 1 && !access(BIN_PATH "/afl-qemu-system-trace", X_OK)) {
+
+    target_path = new_argv[0] = BIN_PATH "/afl-qemu-system-trace";
     return new_argv;
 
   }
@@ -578,9 +726,22 @@ int main(int argc, char** argv) {
   s32 opt;
   u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
   u32 tcnt;
-  char** use_argv;
+  char** use_argv, **argv2, **files;
+  int argc2, i, nfiles;
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
+
+  /* split command line */
+  for(i = 1; i < argc; i++) {
+    if(strcmp(argv[i], "--") == 0)
+      break;
+  }
+  if(!argv[i])
+    usage(argv[0]);
+  argv[i] = 0;
+  argv2 = argv + (i + 1);
+  argc2 = argc - (i + 1);
+  argc = i;
 
   while ((opt = getopt(argc,argv,"+o:m:t:A:eqZQ")) > 0)
 
@@ -673,10 +834,10 @@ int main(int argc, char** argv) {
 
       case 'Q':
 
-        if (qemu_mode) FATAL("Multiple -Q options not supported");
+        //if (qemu_mode) FATAL("Multiple -Q options not supported");
         if (!mem_limit_given) mem_limit = MEM_LIMIT_QEMU;
 
-        qemu_mode = 1;
+        qemu_mode += 1;
         break;
 
       default:
@@ -685,36 +846,61 @@ int main(int argc, char** argv) {
 
     }
 
-  if (optind == argc || !out_file) usage(argv[0]);
+  files = argv + optind;
+  nfiles = argc - optind;
+
+  if (!out_file || !argc2) usage(argv[0]);
+  if (files[0] && at_file) FATAL("Multi-file and -A option are incompatible");
 
   setup_shm();
   setup_signal_handlers();
 
   set_up_environment();
 
-  find_binary(argv[optind]);
+  find_binary(argv2[0]);
 
   if (!quiet_mode) {
     show_banner();
     ACTF("Executing '%s'...\n", target_path);
   }
 
-  detect_file_args(argv + optind);
+  if(files[0])
+    at_file = ".curinput"; // XXX shared by everyone in cwd!
+  detect_file_args(argv2);
 
   if (qemu_mode)
-    use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
+    use_argv = get_qemu_argv(qemu_mode, argv[0], argv2, argc2);
   else
-    use_argv = argv + optind;
+    use_argv = argv2;
 
-  run_target(use_argv);
+  init_forkserver(use_argv);
+  if(!files[0]) { /* just run cmd, output to file */
+    run_target(use_argv);
+    tcnt = write_results();
 
-  tcnt = write_results();
+    if (!quiet_mode) {
+      if (!tcnt) FATAL("No instrumentation detected" cRST);
+      OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+    }
 
-  if (!quiet_mode) {
+  } else {        /* run all files, output to dir */
+    char *out_dir = out_file;
+    mkdir(out_dir, 0755);
+    for(i = 0; i < nfiles; i++) {
+      SAYF("file %d/%d - %s\n", i+1, nfiles, files[i]);
+      unlink(at_file);
+      if(symlink(files[i], at_file) == -1)
+        FATAL("symlink %s to %s failed", files[i], at_file);
 
-    if (!tcnt) FATAL("No instrumentation detected" cRST);
-    OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+      run_target(use_argv);
 
+      out_file = alloc_printf("%s/%s", out_dir, basename(files[i]));
+      tcnt = write_results();
+      if (!quiet_mode) {
+        if (!tcnt) FATAL("No instrumentation detected" cRST);
+        OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+      }
+    }
   }
 
   exit(child_crashed * 2 + child_timed_out);
