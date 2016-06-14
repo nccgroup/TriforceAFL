@@ -1,11 +1,11 @@
 <ProjectTriforce>
 20160613
 https://github.com/nccgroup/TriforceAFL
-Jess Hertz <jesse.hertz@nccgroup.trust>
+Jesse Hertz <jesse.hertz@nccgroup.trust>
 Tim Newsham <tim.newsham@nccgroup.trust>
 
 This is a patched version of AFL that supports full-system
-fuzzing using QEMU.  QEMU has been updated to allow tracing
+fuzzing using QEMU. The included QEMU has been updated to allow tracing
 of branches when running a system emulator for x86_64.
 Extra instructions have been added to start AFL's forkserver,
 make fuzz settings, and mark the start and stop of test cases.
@@ -24,9 +24,6 @@ new changes.  These tools have seen some testing:
 To build:
 
   make
-  cd qemu_mode
-  ./build_triforce.sh
-  cd ..
 
 ---
 To get a coverage map:
