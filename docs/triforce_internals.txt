@@ -1,0 +1,234 @@
+# ProjectTriforce Internals
+
+ProjectTriforce's version of AFL deviates in a few places
+from the stock AFL.  Standard AFL already supports fuzzing with 
+QEMU so a lot of the work was already done.  This document
+summarizes some of the changes and design choices.
+
+## Fuzzing Design
+
+Normally, when fuzzing with AFL, a driver program is started
+for each test case and runs to completion or until it crashes.
+When fuzzing in the context of a full system this is not always
+desirable or possible.  Our design allows the hosted operating
+system to boot up and load a driver that controls the fuzzing
+lifecycle as well as hosts the test cases.  
+
+The driver communicates
+with the virtual machine through a special instruction that
+was added to the CPU that we call `aflCall`.  It supports
+several operations:
+* `startForkserver` - This call causes the virtual machine to
+  start up the AFL fork server.  Every operation in the virtual
+  machine after this call will run in a forked copy of the
+  virtual machine that persists only until the end of a test case.
+  As a side effect, this call will either enable or disable the
+  CPUs timer in each forked child based on an argument.  Disabling
+  the CPU timer can make the fuzz tests more deterministic, but
+  may also interfere with the proper operation of some of the
+  guest operating system's features.
+* `getWork` - This call causes the virtual machine to read in the
+  next input from a file in the host operating system and copy its
+  contents into a buffer in thet guets operating system.
+* `startWork` - This call enables tracing to AFL's edge map.  Tracing
+  is only performed for a range of virtual addresses specified in
+  the startWork call.  This call may be made several times to
+  adjust the range of traced instructions.  For example, you may
+  choose to trace the driver program itself while it parses the
+  input file and then trace the kernel while performing a system
+  call based on the input file.  AFL's search algorithm will only
+  be aware of the edges that are traced, and this call provides a
+  means to adjust what parts of the system to trace.
+* `endWork` - This call notifies the virtual machine that the
+  test case has completed.  It allows the driver to pass in an
+  exit code.  The forked copy of the virtual machine will exit with
+  the specified exit code, which is communicated by the fork server
+  back to AFL and used to determine the outcome of a test case.
+
+Besides the driver calling `endWork`, the virtual machine can
+end a test case if a panic is detected.  This is achieved by
+providing the QEMU virtual machine with an argument specifying
+the address of a panic function.  If this function is ever called,
+the test case is terminated with a status of 32.  Note that this
+argument can specify any basic block of interest, it need not
+represent the `panic` function of the operating system.  
+
+The virtual machine can also intercept a logging function by
+specifying an argument to QEMU with the address of Linux'
+`log_store` function.  The virtual machine assumes that when
+this address is execute, the registers have the arguments
+to the Linux `log_store` function, and it will extract the
+log message and write it to the `logstore.txt` file.  This
+does not trigger immediate termination of the test case.
+However, it does set an internal flag indicating that the
+test case caused logging. When `doneWork` is later called,
+the virtual machine can optionally OR in the value 64 to
+the exit code to indicate that logging occurred.  However, this
+feature is currently disabled in the source code since we
+did not find it particularly useful.
+
+A typical ProjectTriforce AFL fuzzer would perform the following steps:
+* Boot an operating system.
+* The operating system would invoke a fuzz driver as part of its 
+startup process.
+* The driver process would:
+** Start the AFL forkserver.
+** Get a single test case.
+** Enable tracing of the parser.
+** Parse the test case.
+** Enable tracing of the kernel or some portion of the kernel.
+** Invoke a kernel feature based on the parsed input.
+** Notify that the test case completed successfully (if the test case
+   wasn't terminated early by a panic).
+The `afl-fuzz` program would arrange for all of these steps after
+the fork server is started to be repeated for each test case.
+
+Note that since the fuzzer runs in a forked copy of the virtual
+machine, the entire in-memory state of the kernel for each test
+case is isolated. If the operating system uses any other resources
+besides memory, these resources will not be isolated between test
+cases.  For this reason, its usually desirable to boot the
+operating system using an in-memory filesystem such as a Linux ramdisk image.
+
+## QEMU and AFL Code
+
+ProjectTriforce's version of QEMU borrows heavily from the AFL
+QEMU patches.  These patches already included code to trace
+execution edges into AFL's edge map.  However, we found that
+there was a subtle bug in the tracing due to QEMU's execution
+strategy: Sometimes QEMU starts executing a basic block and then
+gets interrupted. It may then re-execute the block from the start
+or translate a portion of the block that wasn't yet executed and
+execute that.  This causes some extra edges to appear in the edge
+map, and introduces some non-determinism to test case traces.
+To reduce the non-determinism, we altered `cpu-exec.c` to
+disable QEMU's "chaining" feature, and moved AFL's tracing
+feature to `cpu_tb_exec` to trace a basic block only after
+it has been executed to competion.
+
+AFL's QEMU performs tracing in its CPU execution code. We
+experimented with performing tracing in the code generated
+for each basic block.  This results in a performance gain
+since the hash function used to hash addresses is only
+computed once, at translation time.  However, due to the
+issues with non-determinism when basic blocks are interrupted,
+and due to some other unresolved issues, we decided to
+continue using the existing tracing method.
+
+AFL's QEMU has a feature to allow the forked virtual machine
+to communicate back to the parent virtual machine whenever
+a new basic block is translated.  This feature is used to
+allow the parent process to translate the block so that future
+children don't have to repeat the work.  This feature works well
+when emulating a user-mode program that has a single address
+space, but is less suitable for a full system where there are
+many programs in different address spaces.  We experimented
+with using this feature for kernel address only (where virtual
+addresses should remain constant) but ran into issues that we
+did not resolve.  We currently disable this feature.  Instead,
+we've taken an approach where we run a "heater" program before
+we run our test driver.  The purpose of the heater program is
+to invoke features that we plan to later test in hopes of
+causing them to be translated in the parent virtual machine
+before the fork server is started.  This approach is an optimization
+that has boosted our performance a little but is not strictly
+necessary.
+
+AFL is typically used with programs that are quite a bit smaller
+than a kernel.  To cope with the larger program, we adjusted
+the edge map size from 2^16 to 2^21 to reduce edge collisions
+to an acceptable level and we updated the hash function to
+a better hash recommended by Peter Gutmann. More information
+about the measurements that lead to this map size can be
+found in
+https://groups.google.com/forum/#!searchin/afl-users/hash/afl-users/iHCx2Z2WncI/Okyn1oXkIwAJ .
+
+
+To support panic and logging detection, we added new
+command line options that receive the virtual address of
+the panic and logging functions.  We also added a new
+command line option to specify which file to read the
+test case input from.  These are recorded in global variables.
+The `gen_aflBBlock` function in `target-i386/translate.c` 
+checks if the translated basic block matches one of
+the two target addresses, and if so causes the translated
+code to call an intercept function: `helper_aflInterceptPanic`
+or `helper_aflInterceptLog`.
+
+Communication from the driver in the guest host to the
+virtual machine is supported with an additional
+CPU instruction implemented in `target-i386/translate.c`.
+When the instruction `0f 24` is execute, the translated
+code will call `helper_aflCall`.  This function dispatches
+to implementations for `startForkserver`, `getWork`,
+`startWork`, or `doneWork`.  Most of these implementations
+are fairly straight-forward. The implementation of `startForkServer`
+is deceptively complicated.
+
+One of the biggest issues we faced when trying to support
+full-system emulation is getting the fork server running.
+AFL's user-mode QEMU emulation has no problems forking since
+it is a single-threaded program. However, QEMU uses several
+threads when running a full-system emulator.  When forking
+a multi-threaded program in most UNIX systems, only the thread
+calling fork is preserved in the child process.  Fork also
+does not preserve important threading state and can leave
+locks, mutexes, semaphores and other threading objects in
+an undefined state.  To address this issue, we took an unusual
+approach to starting the fork server.  Rather than starting
+it immediately, we set a flag to tell the CPU to stop.  When
+the CPU sees this flag set, it exits out of the CPU loop,
+sends notification to the IO thread, records some CPU state
+for later, and exits the CPU thread.  The IO thread receives
+its notification and performs a fork.  At this point there
+are only two threads -- the CPU thread and an internal RCU
+thread.  The RCU thread is already designed to handle forks
+properly and needs not be stopped.  In the child, the CPU
+is restarted using the previously recorded information and
+can continue execution where it left off. 
+
+## AFL utilities
+
+We did not need to make very many changes to the AFL utilities.
+The most ubiquitous change was to add a new `-QQ` option
+to many of the tools.  The old `-Q` option enables QEMU user-mode emulatoin.
+The new `-QQ` mode enables full-system emulation in QEMU.
+Unlike the user-mode version, the system-mode feature does not
+attempt to be clever in setting up the command line, and
+expects the user to pass in the path to the QEMU emulator and
+its flags.
+
+We also made some tuning changes to the AFL configuration.
+Since our operating system might take several minutes
+to start up before invoking the forkserver, we increased
+the amount of time that AFL will wait for the fork server.
+We also increased the default memory limit.
+
+Because our virtual machine indicates panics and other
+undesired behaviors with an exit code, `afl-fuzz` was altered to 
+treat all non-zero exit statuses as a crash. 
+
+Several standard AFL utilities do not support using the
+fork server feature.  This is usually acceptable when a test
+program can be executed in a fraction of a second. However, our
+test cases can only be started after a lengthy operating system
+boot process and the test case itself is only a portion of the
+entire execution.  To run properly with our test cases, we
+require that the utilities use the fork server.  We patched
+`afl-cmin` and `afl-showmap.c` to add
+fork server support.  In the process we had to make some
+changes to these program works.
+We have not yet added support to `afl-tmin.c`, and this utility
+is likely unusable at the moment.
+
+## Code Diffs in Git
+
+Note that the TriforceAFL git is carefully organized to
+include the original versions of AFL and QEMU so that
+our changes can be easily extracted.  To see the changes
+made to QEMU run:
+* `git diff a567f4 qemu_mode/qemu` to see all changes to stock QEMU.
+* `git diff 4c01f8 qemu_mode/qemu` to see all changes made to AFL's
+   version of QEMU.
+* `git diff df9132 [a-pr-z]*` to see all changes to AFL's sources.
+
