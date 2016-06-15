@@ -217,9 +217,15 @@ entire execution.  To run properly with our test cases, we
 require that the utilities use the fork server.  We patched
 `afl-cmin` and `afl-showmap.c` to add
 fork server support.  In the process we had to make some
-changes to these program works.
-We have not yet added support to `afl-tmin.c`, and this utility
-is likely unusable at the moment.
+changes to these program works.  `afl-showmap.c` now supports
+a batch mode where the maps for many inputs are written
+to separate files in an output directory. `afl-cmin` makes
+use of this batch mode and no longer supports the stdin feature
+which doesn't make sense in this context.
+Although `afl-tmin.c` and `afl-analyze.c` have been patched
+to add support for the `-QQ` option, we have not yet added fork server
+support to these programs and they are likely too slow to be
+usable at the moment.
 
 ## Code Diffs in Git
 
