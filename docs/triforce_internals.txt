@@ -12,7 +12,7 @@ for each test case and runs to completion or until it crashes.
 When fuzzing in the context of a full system this is not always
 desirable or possible.  Our design allows the hosted operating
 system to boot up and load a driver that controls the fuzzing
-lifecycle as well as hosts the test cases.  
+life-cycle as well as hosts the test cases.  
 
 The driver communicates
 with the virtual machine through a special instruction that
@@ -29,7 +29,7 @@ several operations:
   guest operating system's features.
 * `getWork` - This call causes the virtual machine to read in the
   next input from a file in the host operating system and copy its
-  contents into a buffer in thet guets operating system.
+  contents into a buffer in the guest operating system.
 * `startWork` - This call enables tracing to AFL's edge map.  Tracing
   is only performed for a range of virtual addresses specified in
   the startWork call.  This call may be made several times to
@@ -72,7 +72,7 @@ A typical ProjectTriforce AFL fuzzer would perform the following steps:
 * The operating system would invoke a fuzz driver as part of its 
 startup process.
 * The driver process would:
-** Start the AFL forkserver.
+** Start the AFL fork server.
 ** Get a single test case.
 ** Enable tracing of the parser.
 ** Parse the test case.
@@ -104,7 +104,7 @@ map, and introduces some non-determinism to test case traces.
 To reduce the non-determinism, we altered `cpu-exec.c` to
 disable QEMU's "chaining" feature, and moved AFL's tracing
 feature to `cpu_tb_exec` to trace a basic block only after
-it has been executed to competion.
+it has been executed to completion.
 
 AFL's QEMU performs tracing in its CPU execution code. We
 experimented with performing tracing in the code generated
@@ -191,7 +191,7 @@ can continue execution where it left off.
 
 We did not need to make very many changes to the AFL utilities.
 The most ubiquitous change was to add a new `-QQ` option
-to many of the tools.  The old `-Q` option enables QEMU user-mode emulatoin.
+to many of the tools.  The old `-Q` option enables QEMU user-mode emulation.
 The new `-QQ` mode enables full-system emulation in QEMU.
 Unlike the user-mode version, the system-mode feature does not
 attempt to be clever in setting up the command line, and
@@ -200,7 +200,7 @@ its flags.
 
 We also made some tuning changes to the AFL configuration.
 Since our operating system might take several minutes
-to start up before invoking the forkserver, we increased
+to start up before invoking the fork server, we increased
 the amount of time that AFL will wait for the fork server.
 We also increased the default memory limit.
 
