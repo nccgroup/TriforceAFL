@@ -25,11 +25,6 @@ To build:
 
   make
 
-If you've never installed qemu on your system before, you'll need to install a bios:
-
-  cd qemu_mode/qemu
-  sudo make install
-  
 ---
 To get a coverage map:
 
