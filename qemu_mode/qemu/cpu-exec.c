@@ -176,7 +176,7 @@ void cpu_reload_memory_map(CPUState *cpu)
 #endif
 
 /* Execute a TB, and fix up the CPU state afterwards if necessary */
-static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
+static inline tcg_target_ulong cpu_tb_exec(target_ulong pc, CPUState *cpu, uint8_t *tb_ptr)
 {
     CPUArchState *env = cpu->env_ptr;
     uintptr_t next_tb;
@@ -198,7 +198,6 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, uint8_t *tb_ptr)
 #endif /* DEBUG_DISAS */
 
     cpu->can_do_io = 0;
-    target_ulong pc = env->eip;
     next_tb = tcg_qemu_tb_exec(env, tb_ptr);
     cpu->can_do_io = 1;
     trace_exec_tb_exit((void *) (next_tb & ~TB_EXIT_MASK),
@@ -256,7 +255,7 @@ static void cpu_exec_nocache(CPUArchState *env, int max_cycles,
     cpu->current_tb = tb;
     /* execute the generated code */
     trace_exec_tb_nocache(tb, tb->pc);
-    cpu_tb_exec(cpu, tb->tc_ptr);
+    cpu_tb_exec(tb->pc, cpu, tb->tc_ptr);
     cpu->current_tb = NULL;
     tb_phys_invalidate(tb, -1);
     tb_free(tb);
@@ -534,7 +533,7 @@ int cpu_exec(CPUArchState *env)
                     trace_exec_tb(tb, tb->pc);
                     tc_ptr = tb->tc_ptr;
                     /* execute the generated code */
-                    next_tb = cpu_tb_exec(cpu, tc_ptr);
+                    next_tb = cpu_tb_exec(tb->pc, cpu, tc_ptr);
                     switch (next_tb & TB_EXIT_MASK) {
                     case TB_EXIT_REQUESTED:
                         /* Something asked us to stop executing

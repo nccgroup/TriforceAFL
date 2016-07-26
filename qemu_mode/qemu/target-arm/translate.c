@@ -82,6 +82,8 @@ static const char *regnames[] =
     { "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
       "r8", "r9", "r10", "r11", "r12", "r13", "r14", "pc" };
 
+static void gen_aflBBlock(target_ulong pc);
+
 /* initialize TCG globals.  */
 void arm_translate_init(void)
 {
@@ -9015,10 +9017,21 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
             break;
         case 0xf:
             /* swi */
-            gen_set_pc_im(s, s->pc);
-            s->svc_imm = extract32(insn, 0, 24);
-            s->is_jmp = DISAS_SWI;
-            break;
+            {target_ulong svc_imm = extract32(insn, 0, 24);
+            if(svc_imm == 0x4c4641) {
+                tmp = load_reg(s, 0);
+                tmp2 = load_reg(s, 1);
+                tmp3 = load_reg(s, 2);
+                gen_helper_aflCall(tmp, cpu_env, tmp, tmp2, tmp3);
+                tcg_temp_free_i32(tmp3);
+                tcg_temp_free_i32(tmp2);
+                store_reg(s, 0, tmp);
+            } else {
+                gen_set_pc_im(s, s->pc);
+                s->svc_imm = svc_imm;
+                s->is_jmp = DISAS_SWI;
+            }
+            }break;
         default:
         illegal_op:
             gen_exception_insn(s, 4, EXCP_UDEF, syn_uncategorized());
@@ -11052,6 +11065,7 @@ static inline void gen_intermediate_code_internal(ARMCPU *cpu,
     dc->tb = tb;
 
     dc->is_jmp = DISAS_NEXT;
+    gen_aflBBlock(pc_start);
     dc->pc = pc_start;
     dc->singlestep_enabled = cs->singlestep_enabled;
     dc->condjmp = 0;
@@ -11455,3 +11469,142 @@ void restore_state_to_opc(CPUARMState *env, TranslationBlock *tb, int pc_pos)
         env->condexec_bits = gen_opc_condexec_bits[pc_pos];
     }
 }
+
+
+// XXX lots of shared code here could be factored out
+#include "afl.h"
+
+static target_ulong startForkserver(CPUArchState *env, target_ulong enableTicks)
+{
+    //printf("pid %d: startForkServer\n", getpid()); fflush(stdout);
+    assert(!afl_fork_child);
+#ifdef CONFIG_USER_ONLY
+    /* we're running in the main thread, get right to it! */
+    afl_setup();
+    afl_forkserver(env);
+#else
+    /*
+     * we're running in a cpu thread. we'll exit the cpu thread
+     * and notify the iothread.  The iothread will run the forkserver
+     * and in the child will restart the cpu thread which will continue
+     * execution.
+     * N.B. We assume a single cpu here!
+     */
+    aflEnableTicks = enableTicks;
+    afl_wants_cpu_to_stop = 1;
+#endif
+    return 0;
+}
+
+/* copy work into ptr[0..sz].  Assumes memory range is locked. */
+static target_ulong getWork(CPUArchState *env, target_ulong ptr, target_ulong sz)
+{
+    target_ulong retsz;
+    FILE *fp;
+    unsigned char ch;
+
+    //printf("pid %d: getWork %lx %lx\n", getpid(), ptr, sz);fflush(stdout);
+    assert(aflStart == 0);
+    fp = fopen(aflFile, "rb");
+    if(!fp) {
+         perror(aflFile);
+         return -1;
+    }
+    retsz = 0;
+    while(retsz < sz) {
+        if(fread(&ch, 1, 1, fp) == 0)
+            break;
+        cpu_stb_data(env, ptr, ch);
+        retsz ++;
+        ptr ++;
+    }
+    fclose(fp);
+    return retsz;
+}
+
+static target_ulong startWork(CPUArchState *env, target_ulong ptr)
+{
+    target_ulong start, end;
+
+    printf("pid %d: ptr %lx\n", getpid(), ptr);fflush(stdout);
+    start = cpu_ldq_data(env, ptr);
+    end = cpu_ldq_data(env, ptr + 8);
+
+    afl_start_code = start;
+    afl_end_code   = end;
+    printf("pid %d: startWork %lx - %lx\n", getpid(), afl_start_code, afl_end_code);fflush(stdout);
+    aflGotLog = 0;
+    aflStart = 1;
+    return 0;
+}
+
+static target_ulong doneWork(target_ulong val)
+{
+    //printf("pid %d: doneWork %lx\n", getpid(), val);fflush(stdout);
+    assert(aflStart == 1);
+/* detecting logging as crashes hasnt been helpful and
+   has occasionally been a problem.  We'll leave it to
+   a post-analysis phase to look over dmesg output for
+   our corpus.
+ */
+#ifdef LETSNOT 
+    if(aflGotLog)
+        exit(64 | val);
+#endif
+    exit(val); /* exit forkserver child */
+}
+
+target_ulong helper_aflCall(CPUArchState *env, target_ulong code, target_ulong a0, target_ulong a1) {
+    switch(code) {
+    case 1: return startForkserver(env, a0);
+    case 2: return getWork(env, a0, a1);
+    case 3: return startWork(env, a0);
+    case 4: return doneWork(a0);
+    default: return -1;
+    }
+}
+
+void helper_aflInterceptLog(CPUArchState *env)
+{
+    if(!aflStart)
+        return;
+    aflGotLog = 1;
+
+#ifdef NOTYET
+    static FILE *fp = NULL;
+    if(fp == NULL) {
+        fp = fopen("logstore.txt", "a");
+        if(fp) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            fprintf(fp, "\n----\npid %d time %ld.%06ld\n", getpid(), (u_long)tv.tv_sec, (u_long)tv.tv_usec);
+        }
+    }
+    if(!fp)
+        return;
+
+    target_ulong stack = env->regs[R_ESP];
+    //target_ulong level = env->regs[R_ESI]; // arg 2
+    target_ulong ptext = cpu_ldq_data(env, stack + 0x8); // arg7
+    target_ulong len   = cpu_ldq_data(env, stack + 0x10) & 0xffff; // arg8
+    const char *msg = peekStrZ(env, ptext, len);
+    fprintf(fp, "%s\n", msg);
+#endif
+}
+
+void helper_aflInterceptPanic(void)
+{
+    if(!aflStart)
+        return;
+    exit(32);
+}
+
+static void gen_aflBBlock(target_ulong pc)
+{
+    if(pc == aflPanicAddr)
+        gen_helper_aflInterceptPanic();
+    if(pc == aflDmesgAddr)
+        gen_helper_aflInterceptLog(cpu_env);
+}
+
+
