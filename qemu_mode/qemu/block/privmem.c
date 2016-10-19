@@ -38,7 +38,7 @@ static int privmem_file_open(BlockDriverState *bs, QDict *options, int flags,
 {
     QemuOpts *opts;
     BDRVCOWState *s = bs->opaque;
-    const char *filename;
+    const char *filename, *p;
     struct stat sb;
     int ret = 0;
 
@@ -50,6 +50,11 @@ static int privmem_file_open(BlockDriverState *bs, QDict *options, int flags,
         ret = -EINVAL;
         goto fail;
     }
+
+    /* strip "privmem:". XXX whats the proper way to handle this? */
+    p = strchr(filename, ':');
+    if(p)
+        filename = p + 1;
 
     s->fd = qemu_open(filename, O_RDONLY);
     if (fstat(s->fd, &sb) == -1 || !S_ISREG(sb.st_mode)) {
