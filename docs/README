@@ -93,7 +93,7 @@ New QEMU instructions:
             the test case.)
 
 New QEMU block driver:
-   -drive driver=privmem,filename=<name> 
+   -drive filename=privmem:<name> 
       This block driver keeps the drive's image in copy-on-write memory
       so that changes are never persisted to disk.  Changes made by
       on test case are isolated from other test cases.
