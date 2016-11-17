@@ -8148,7 +8148,14 @@ void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb, int pc_pos)
 static target_ulong startForkserver(CPUArchState *env, target_ulong enableTicks)
 {
     //printf("pid %d: startForkServer\n", getpid()); fflush(stdout);
-    assert(!afl_fork_child);
+    if(afl_fork_child) {
+        /* 
+         * we've already started a fork server. perhaps a test case
+         * accidentally triggered startForkserver again.  Exit the
+         * test case without error.
+         */
+        exit(0);
+    }
 #ifdef CONFIG_USER_ONLY
     /* we're running in the main thread, get right to it! */
     afl_setup();
