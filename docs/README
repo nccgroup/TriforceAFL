@@ -1,5 +1,10 @@
 <ProjectTriforce>
-20160613
+
+New: For those looking to play with TriforceAFL and TLSF, Richard Johnson created a Dockerfile which installs both (and even builds a Linux kernel for you). It's available here <https://hub.docker.com/r/moflow/afl-triforce/tags/>.
+
+Also new: afl-tmin now works with the forkserver!
+
+
 https://github.com/nccgroup/TriforceAFL
 Jesse Hertz <jesse.hertz@nccgroup.trust>
 Tim Newsham <tim.newsham@nccgroup.trust>
