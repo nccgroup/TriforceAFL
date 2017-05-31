@@ -257,11 +257,19 @@ static inline target_ulong aflHash(target_ulong cur_loc)
      the value to get something quasi-uniform. */
 
   target_ulong h = cur_loc;
+#if TARGET_LONG_BITS == 32
+  h ^= cur_loc >> 16;
+  h *= 0x85ebca6b;
+  h ^= h >> 13;
+  h *= 0xc2b2ae35;
+  h ^= h >> 16;
+#else
   h ^= cur_loc >> 33;
   h *= 0xff51afd7ed558ccd;
   h ^= h >> 33;
   h *= 0xc4ceb9fe1a85ec53;
   h ^= h >> 33;
+#endif
 
   h &= MAP_SIZE - 1;
 
@@ -333,6 +341,7 @@ static void afl_wait_tsl(CPUArchState *env, int fd) {
         without having it's guest's kernel page the data in !  
         so we will only JIT kernel code segment which shouldnt page.
         */
+        // XXX this monstrosity must go!
         if(t.pc >= 0xffffffff81000000 && t.pc <= 0xffffffff81ffffff) {
             //printf("wait_tsl %lx -- jit\n", t.pc); fflush(stdout);
             tb_find_slow(env, t.pc, t.cs_base, t.flags);
