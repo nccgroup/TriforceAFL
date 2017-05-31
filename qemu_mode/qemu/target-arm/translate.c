@@ -82,7 +82,7 @@ static const char *regnames[] =
     { "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
       "r8", "r9", "r10", "r11", "r12", "r13", "r14", "pc" };
 
-static void gen_aflBBlock(target_ulong pc);
+void gen_aflBBlock(target_ulong pc);
 
 /* initialize TCG globals.  */
 void arm_translate_init(void)
@@ -9022,7 +9022,7 @@ static void disas_arm_insn(DisasContext *s, unsigned int insn)
                 tmp = load_reg(s, 0);
                 tmp2 = load_reg(s, 1);
                 tmp3 = load_reg(s, 2);
-                gen_helper_aflCall(tmp, cpu_env, tmp, tmp2, tmp3);
+                gen_helper_aflCall32(tmp, cpu_env, tmp, tmp2, tmp3);
                 tcg_temp_free_i32(tmp3);
                 tcg_temp_free_i32(tmp2);
                 store_reg(s, 0, tmp);
@@ -11477,7 +11477,14 @@ void restore_state_to_opc(CPUARMState *env, TranslationBlock *tb, int pc_pos)
 static target_ulong startForkserver(CPUArchState *env, target_ulong enableTicks)
 {
     //printf("pid %d: startForkServer\n", getpid()); fflush(stdout);
-    assert(!afl_fork_child);
+    if(afl_fork_child) {
+        /* 
+         * we've already started a fork server. perhaps a test case
+         * accidentally triggered startForkserver again.  Exit the
+         * test case without error.
+         */
+        exit(0);
+    }
 #ifdef CONFIG_USER_ONLY
     /* we're running in the main thread, get right to it! */
     afl_setup();
@@ -11526,13 +11533,13 @@ static target_ulong startWork(CPUArchState *env, target_ulong ptr)
 {
     target_ulong start, end;
 
-    printf("pid %d: ptr %lx\n", getpid(), ptr);fflush(stdout);
+    //printf("pid %d: ptr %lx\n", getpid(), ptr);fflush(stdout);
     start = cpu_ldq_data(env, ptr);
     end = cpu_ldq_data(env, ptr + 8);
+    //printf("pid %d: startWork %lx - %lx\n", getpid(), start, end);fflush(stdout);
 
     afl_start_code = start;
     afl_end_code   = end;
-    printf("pid %d: startWork %lx - %lx\n", getpid(), afl_start_code, afl_end_code);fflush(stdout);
     aflGotLog = 0;
     aflStart = 1;
     return 0;
@@ -11554,12 +11561,16 @@ static target_ulong doneWork(target_ulong val)
     exit(val); /* exit forkserver child */
 }
 
+uint32_t helper_aflCall32(CPUArchState *env, uint32_t code, uint32_t a0, uint32_t a1) {
+    return (uint32_t)helper_aflCall(env, code, a0, a1);
+}
+
 target_ulong helper_aflCall(CPUArchState *env, target_ulong code, target_ulong a0, target_ulong a1) {
     switch(code) {
-    case 1: return startForkserver(env, a0);
-    case 2: return getWork(env, a0, a1);
-    case 3: return startWork(env, a0);
-    case 4: return doneWork(a0);
+    case 1: return (uint32_t)startForkserver(env, a0);
+    case 2: return (uint32_t)getWork(env, a0, a1);
+    case 3: return (uint32_t)startWork(env, a0);
+    case 4: return (uint32_t)doneWork(a0);
     default: return -1;
     }
 }
@@ -11580,7 +11591,7 @@ void helper_aflInterceptLog(CPUArchState *env)
             fprintf(fp, "\n----\npid %d time %ld.%06ld\n", getpid(), (u_long)tv.tv_sec, (u_long)tv.tv_usec);
         }
     }
-    if(!fp)
+    if(!fp) 
         return;
 
     target_ulong stack = env->regs[R_ESP];
@@ -11599,7 +11610,7 @@ void helper_aflInterceptPanic(void)
     exit(32);
 }
 
-static void gen_aflBBlock(target_ulong pc)
+void gen_aflBBlock(target_ulong pc)
 {
     if(pc == aflPanicAddr)
         gen_helper_aflInterceptPanic();
