@@ -57,7 +57,11 @@ static void exception_action(CPUState *cpu)
 void cpu_resume_from_signal(CPUState *cpu, void *puc)
 {
 #ifdef __linux__
+#if __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 26
+    struct ucontext_t *uc = puc;
+#else
     struct ucontext *uc = puc;
+#endif
 #elif defined(__OpenBSD__)
     struct sigcontext *uc = puc;
 #endif
@@ -209,6 +213,11 @@ int cpu_signal_handler(int host_signum, void *pinfo,
 #define TRAP_sig(context)     ((context)->uc_mcontext.mc_trapno)
 #define ERROR_sig(context)    ((context)->uc_mcontext.mc_err)
 #define MASK_sig(context)     ((context)->uc_sigmask)
+#elif __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 26
+#define PC_sig(context)       (((struct ucontext_t *)context)->uc_mcontext.gregs[REG_RIP])
+#define TRAP_sig(context)     (((struct ucontext_t *)context)->uc_mcontext.gregs[REG_TRAPNO])
+#define ERROR_sig(context)    (((struct ucontext_t *)context)->uc_mcontext.gregs[REG_ERR])
+#define MASK_sig(context)     (((struct ucontext_t *)context)->uc_sigmask)
 #else
 #define PC_sig(context)       ((context)->uc_mcontext.gregs[REG_RIP])
 #define TRAP_sig(context)     ((context)->uc_mcontext.gregs[REG_TRAPNO])

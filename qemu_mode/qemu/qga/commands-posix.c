@@ -13,6 +13,9 @@
 
 #include <glib.h>
 #include <sys/types.h>
+#if __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 26
+#include <sys/sysmacros.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>

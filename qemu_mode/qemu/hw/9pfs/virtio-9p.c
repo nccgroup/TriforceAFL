@@ -20,6 +20,9 @@
 #include "virtio-9p-coth.h"
 #include "trace.h"
 #include "migration/migration.h"
+#if __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 26
+#include <sys/sysmacros.h>
+#endif
 
 int open_fd_hw;
 int total_open_fd;

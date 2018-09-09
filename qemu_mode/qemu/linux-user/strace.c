@@ -5,6 +5,9 @@
 #include <sys/shm.h>
 #include <sys/select.h>
 #include <sys/types.h>
+#if __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 26
+#include <sys/sysmacros.h>
+#endif
 #include <sys/mount.h>
 #include <sys/mman.h>
 #include <unistd.h>
